@@ -1,0 +1,807 @@
+---
+title: "An Analysis of Music Enduring Impact"
+date: "AT 2023"
+output: 
+  html_document
+---
+
+```{r setup, include=FALSE} 
+# this chunk contains code that sets global options for the entire .Rmd. 
+# we use include=FALSE to suppress it from the top of the document, but it will still appear in the appendix. 
+
+knitr::opts_chunk$set(echo = FALSE) # actually set the global chunk options. 
+# we set echo=FALSE to suppress code such that it by default does not appear throughout the document. 
+# note: this is different from .Rmd default
+```
+
+
+```{r message=FALSE}
+#load the packages we need in this project
+library(dplyr)
+library(tidyverse)
+library(rvest)
+library(netstat)
+library(gtrendsR)
+library(httr)
+library(jsonlite)
+library(DBI)
+library(tidycensus)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(spotifyr)
+library(lubridate)
+library(corrplot)
+
+#install.packages('spotifyr')
+#install.packages('gtrendsR')
+#install.packages('corrplot')
+```
+
+The Github repo can be found at https://github.com/claireccc04/472_assignment4
+
+---
+
+## <br> 1. Introduction
+__Research Question:__
+
+* How has the greatest music endured?
+
+* Are there any features or characteristics that seem to explain enduring engagement?
+
+To measure the longevity of music's popularity effectively and cost-efficiently, this analysis focus on the scope of the 100 greatest musical artists ranked by *Rolling Stone* Magazine and primarily concentrates on the following three dimensions: 
+
+* __Cultural Influence:__ Assess artists' impact in the online public sphere based on the data of Google Trends. Google search effectively mirrors the flowing hot topics over years, thus the index of Google Hits is a powerful tool to gauge artists' impact in popular culture. More details about the Hit metrics can be viewed at https://newsinitiative.withgoogle.com/resources/trainings/google-trends-understanding-the-data/
+
+* __Audience Engagement:__ The figures of artists' followers on Spotify can tangibly reflect audiences' attention and like to artists. Generally, audiences tend to follow an artist when there is significant interest or engagement with their work.
+
+* __Commercial Consumption:__ Spotify's Popularity Index shows people's music orientation today, and is also one of the important indicators of artists' commercial value within the industry. More discussion of SPI can be checked at https://community.spotify.com/t5/Content-Questions/Artist-popularity/td-p/4415259 and https://www.loudlab.org/blog/spotify-popularity-leverage-algorithm/
+
+* Google Hits is time-series data from 2004 to 2023 while the other two are cross-sectional data in 2023.
+
+
+We include factors from both the external cultural environment and the track itself to understand their impact in the music enduring engagement.
+
+* __Track Features:__ The quantitative variables of tracks
+
+* __Music Genres:__ Divide the genres into 5 top categories: Folk, Hiphop, Jazz, Pop, and Rock
+
+* __Release Date:__ The issue date of the track
+
+---
+
+---
+
+## <br> 2. Data
+The analysis datasets are stored in the `music_db.sqlite` database including 7 datasets.
+
+* __rs_table__ is the table of *Rolling Stone* Magazine ranking with 2 variables: ranking, artist. Data is access through web scrapping.
+
+* __artist_df__ is the table of Spotify's artists' information with 7 variables: Spotify's artist id, artist name, followers, genres, popularity, artist_url, top_genre. Data is accessed via Spotify API with *Search for item* endpoint.
+
+* __track_df__ is the table of artists' top tracks with 9 variables: artist_id, artist, track, album, duration, explicit, popularity, release_date, track_id. It is accessed via Spotify API with *Artists* endpoint.
+
+* __feature_df__ is the table of top tracks' features with 10 variables: track_id, acousticness, danceability, energy, instrumentalness, liveness, loudness, tempo, valence, duration. It is accessed via Spotify API with *Tracks* endpoint.
+
+* __trends_df__ is the table of artists' Google Hits with 8 variables: date, hits, keyword, geo, time, gprop, category, year. It is accessed by using *gtrendsR* package. https://cran.r-project.org/web/packages/gtrendsR/gtrendsR.pdf
+
+* __yearly_sum__ is the table of artists' yearly sum of Google Hits with 3 variables: year, keyword(artist), year_sum. It is transformed from *trends_df*.
+
+* __cor_df__ is a dataset from Kaggle that contains various audio statistics and ratings of the top 1,994 songs on Spotify. https://www.kaggle.com/datasets/iamsumat/spotify-top-2000s-mega-dataset
+
+
+---
+
+---
+
+
+
+```{r eval = FALSE}
+#create the database in the local driver
+music_db <- dbConnect(RSQLite::SQLite(), "database/music_db.sqlite")
+
+#check if the database exists
+exists <- file.exists("database/music_db.sqlite")
+if (exists) {
+  print('Database exists.')
+} else {
+  print('Database does not exist.')
+}
+
+dbDisconnect(music_db)
+```
+
+```{r}
+#function checking for the existence, dimensionality and column names of the table
+check_table <- function(db_name, table_name) {
+  
+  #connect to the database
+  db <- dbConnect(RSQLite::SQLite(), dbname = db_name)
+  
+  #check if the table exists
+  if (dbExistsTable(db, table_name)) {
+    
+    #get the row count of the table
+    table_rows <- dbGetQuery(db,
+                           paste("SELECT COUNT(*)
+                            FROM", table_name))
+    
+    #get the col count of the table
+    table_cols <- length(dbListFields(db, paste(table_name)))
+    
+    #get the col names of the table
+    table_colnames <- dbListFields(db, paste(table_name))
+    
+    #disconnect the database
+    dbDisconnect(db)
+    
+    return(list(
+      paste0('There are ', table_rows, ' rows in this table.'),
+      paste0('There are ', table_cols, ' columns in this table.'),
+      paste0('The column names are:', paste(table_colnames, collapse = ', '))
+      ))
+  } else {
+    dbDisconnect(db)
+    return("The table does not exist.")
+  }
+}
+```
+
+
+
+```{r eval = FALSE}
+rs_table <- function() {
+  
+  #set up a dataframe including 2 columns
+  rs_df <- data.frame(matrix(ncol = 2, nrow = 0))
+  colnames(rs_df) <- c('ranking', 'artist')
+  
+  #scrap the first half of the ranking 
+  #from 100 to 51
+  fh_url <- "https://www.rollingstone.com/music/music-lists/100-greatest-artists-147446/"
+  fh_html <- read_html(fh_url)
+  fh_artist <- fh_html %>% html_elements(css = 'h2') %>% html_text()
+  #reverse the order
+  fh_artist <- rev(fh_artist[1:50])
+  
+  #scrap the second half of the ranking
+  #from 50 to 1
+  sh_url <- "https://www.rollingstone.com/music/music-lists/100-greatest-artists-147446/the-band-2-88489/"
+  sh_html <- read_html(sh_url)
+  sh_artist <- sh_html %>% html_elements(css = 'h2') %>% html_text()
+  #reverse the order 
+  sh_artist <- rev(sh_artist[1:50])
+  
+  #join two dataframes together  
+  rs_df <- rbind(rs_df, data.frame(ranking = NA, artist = sh_artist))
+  rs_df <- rbind(rs_df, data.frame(ranking = NA, artist = fh_artist))
+  rs_df$ranking <- seq(1, 100)
+    
+  return(rs_df)
+  
+}
+
+rs_df <- rs_table()
+```
+
+
+```{r eval = FALSE}
+#connect to the database
+music_db <- dbConnect(RSQLite::SQLite(), 'database/music_db.sqlite')
+
+#add the *rs_df* table to the database 
+dbWriteTable(music_db, "rs_df", rs_df)
+dbDisconnect(music_db)
+```
+
+```{r eval = FALSE}
+#check if the table exists
+check_result_rs_df <- check_table("database/music_db.sqlite", "rs_df")
+print(check_result_rs_df)
+```
+
+
+
+
+
+
+```{r eval = FALSE}
+#get a vector of artists' name
+artist_names <- rs_df$artist %>% str_split(";") %>% unlist()
+
+spotify_search <- function(terms) {
+  
+  #set up a dataframe including 6 columns
+  artist_df <- data.frame(matrix(ncol = 6, nrow = 0))
+  colnames(artist_df) <- c('id', 'name','followers', 'genres', 'popularity', 'artist_url')
+  
+  #endpoint URL can be divided into 2 parts
+  base_url1 <- "https://api.spotify.com/v1/search?query="
+  base_url2 <- "&type=artist&limit=5"
+  
+  #get the access token via client id and secret
+  readRenviron("spotify_api.env")
+  id <- Sys.getenv('id')
+  secret <- Sys.getenv('secret')
+  access_token <- get_spotify_access_token(
+    client_id = id,
+    client_secret = secret
+  )
+  
+  #loop through 100 artists
+  for (term in terms) {
+    
+    #get the current URL
+    current_term <- gsub(" ", "", gsub("[[:punct:]]", "", tolower(term)))
+    current_url <- paste0(base_url1, current_term, base_url2)
+    
+    #request the API
+    r <- GET(current_url,
+             add_headers(Authorization = paste("Bearer", access_token)))
+    artist_json <- content(r, "parsed")
+    
+    #find the information we need
+    id <- artist_json$artists$items[[1]]$id
+    followers <- artist_json$artists$items[[1]]$followers$total
+    genres <- paste(artist_json$artists$items[[1]]$genres, collapse = ', ')
+    popularity <- artist_json$artists$items[[1]]$popularity
+    artist_url <- artist_json$artists$items[[1]]$external_urls$spotify
+    
+    #add the data into dataframe     
+    artist_df <- rbind(artist_df, data.frame(id = id, name = term, 
+                                             followers = followers, genres = genres, 
+                                             popularity = popularity, artist_url = artist_url))
+        
+  }
+  
+  return(artist_df)
+  
+}
+
+artist_df <- spotify_search(artist_names)
+```
+
+
+```{r eval = FALSE}
+genres <- artist_df$genres %>% str_split(";") %>% unlist()
+
+#divide the genres into 5 top categories: folk, hiphop, jazz, pop, and rock
+#categories are selected based on the Wikipedia definition of music genres, a general overview of the 100 artist genres, and the existing Spotify dataset from Kaggle "https://www.kaggle.com/datasets/iamsumat/spotify-top-2000s-mega-dataset"
+
+#a function of reclassifying music genres by word frequency
+#every artist is grouped into the most prominent genre
+countGenres <- function(genres, table) {
+  
+  #loop through 100 artists by index
+  for (i in 1:100) {
+    genre <- genres[i]
+    
+    #calculate the word frequency of each genre respectively
+    counts <- c(
+      folk = length(grep("folk", genre)),
+      hiphop = length(grep("hip hop", genre)),
+      jazz = length(grep("jazz", genre)),
+      pop = length(grep("pop", genre)),
+      rock = length(grep("rock", genre))
+  )
+    #select the most one
+    max_genre <- names(counts)[which.max(counts)]
+    
+    #add it to the dataframe
+    table[i, "top_genre"] <- max_genre
+  }
+ 
+  return(table)
+}
+
+artist_df <- countGenres(genres, artist_df)
+```
+
+
+```{r eval = FALSE}
+#connect to the database
+music_db <- dbConnect(RSQLite::SQLite(), 'database/music_db.sqlite')
+
+#add the *artist_df* table to the database 
+dbWriteTable(music_db, "artist_df", artist_df)
+dbDisconnect(music_db)
+```
+
+```{r eval = FALSE}
+#check if the table exists
+check_result_artist_df <- check_table("database/music_db.sqlite", "artist_df")
+print(check_result_artist_df)
+```
+
+
+
+
+
+```{r eval = FALSE}
+#get a vector of artists' id
+artist_id <- artist_df$id %>% str_split(";") %>% unlist()
+
+top_tracks <- function(terms) {
+  
+  #set up a dataframe including 9 columns
+  track_df <- data.frame(matrix(ncol = 9, nrow = 0))
+  colnames(track_df) <- c('artist_id', 'artist', 'track', 'album', 'duration', 'explicit',
+                          'popularity', 'release_date', 'track_id')
+  
+  #base URL can be divided into 2 parts
+  base_url1 <- "https://api.spotify.com/v1/artists/"
+  base_url2 <- "/top-tracks?market=US"
+  
+  #get the access token via client id and secret
+  readRenviron("spotify_api.env")
+  id <- Sys.getenv('id')
+  secret <- Sys.getenv('secret')
+  access_token <- get_spotify_access_token(
+    client_id = id,
+    client_secret = secret
+  )
+  
+  #loop through 100 artists
+  for (term in terms) {
+    current_url <- paste0(base_url1, term, base_url2)
+    
+    #request the API
+    r <- GET(current_url,
+          add_headers(Authorization = paste("Bearer", access_token)))
+    track_json <- content(r, "parsed")
+    
+    #find the information we want
+    artist <- artist_df[artist_df$id == term, 'name']
+    track <- track_json$tracks[[1]]$name
+    album <- track_json$tracks[[1]]$album$name
+    duration <- track_json$tracks[[1]]$duration_ms
+    explicit <- track_json$tracks[[1]]$explicit
+    popularity <- track_json$tracks[[1]]$popularity
+    release_date <- track_json$tracks[[1]]$album$release_date
+    track_id <- track_json$tracks[[1]]$id
+    
+    #add it to the dataframe
+    track_df <- rbind(track_df, data.frame(artist_id = term, artist = artist,track = track, 
+                                           album = album, duration = duration, explicit = explicit, 
+                                           popularity = popularity, release_date = release_date,
+                                           track_id = track_id))
+    
+  }
+  
+  return(track_df)
+  
+}
+
+track_df <- top_tracks(artist_id)
+```
+
+
+```{r eval = FALSE}
+#connect to the database
+music_db <- dbConnect(RSQLite::SQLite(), 'database/music_db.sqlite')
+
+#add the *track_df* table to the database 
+dbWriteTable(music_db, "track_df", track_df)
+dbDisconnect(music_db)
+```
+
+```{r eval = FALSE}
+#check if the table exists
+check_result_track_df <- check_table("database/music_db.sqlite", "track_df")
+print(check_result_track_df)
+```
+
+
+
+```{r eval = FALSE}
+#get a vector of tracks' id
+track_id <- track_df$track_id %>% str_split(";") %>% unlist()
+
+track_features <- function(terms) {
+  
+  #set up a dataframe including 10 columns
+  feature_df <- data.frame(track_id = character(),
+                           acousticness = numeric(), 
+                           danceability = numeric(), 
+                           energy = numeric(),
+                           instrumentalness = numeric(),
+                           liveness = numeric(),
+                           loudness = numeric(),
+                           tempo = numeric(),
+                           valence = numeric(),
+                           duration = numeric(), stringsAsFactors = FALSE)
+  
+  url <- "https://api.spotify.com/v1/audio-features/"
+  
+  #get the access token via client id and secret
+  readRenviron("spotify_api.env")
+  id <- Sys.getenv('id')
+  secret <- Sys.getenv('secret')
+  access_token <- get_spotify_access_token(
+    client_id = id,
+    client_secret = secret
+  )
+
+  #loop through 100 top tracks of the artists
+  for (term in terms) {
+    
+    current_url <- paste0(url, term)
+    
+    #request the API
+    r <- GET(current_url,
+          add_headers(Authorization = paste("Bearer", access_token)))
+
+    feature_json <- content(r, "parsed")
+    
+    #find the variables we want
+    acousticness <- feature_json$acousticness
+    danceability <- feature_json$danceability
+    energy <- feature_json$energy
+    instrumentalness <- feature_json$instrumentalness
+    liveness <- feature_json$liveness
+    loudness <- feature_json$loudness
+    tempo <- feature_json$tempo
+    valence <- feature_json$valence
+    duration <- feature_json$duration_ms
+    
+    #add it to the dataframe
+    feature_df <- rbind(feature_df, data.frame(track_id = term, acousticness = acousticness, 
+                                           danceability = danceability, energy = energy, instrumentalness = instrumentalness, 
+                                           liveness = liveness, loudness = loudness, tempo = tempo, 
+                                           valence = valence, duration = duration))
+    
+  }
+  
+  return(feature_df)
+  
+}
+
+feature_df <- track_features(track_id)
+```
+
+```{r eval = FALSE}
+#connect to the database
+music_db <- dbConnect(RSQLite::SQLite(), 'database/music_db.sqlite')
+
+#add the *feature_df* table to the database 
+dbWriteTable(music_db, "feature_df", feature_df)
+dbDisconnect(music_db)
+```
+
+
+```{r eval = FALSE}
+#check if the table exists
+check_result_feature_df <- check_table("database/music_db.sqlite", "feature_df")
+print(check_result_feature_df)
+```
+
+
+
+
+
+```{r eval = FALSE}
+trend_scrap <- function(terms) {
+  
+  #set up a dataframe including 7 columns
+  trends_df <- data.frame(matrix(ncol = 7, nrow = 0))
+  
+  #loop through 100 artists
+  for (term in terms) {
+    
+    #tryCatch() can avoid interruption due to error
+    tryCatch({
+      
+      #get the table of Google Trend
+      interest <- as_tibble(gtrends(keyword = term,
+                                  time = "all",
+                                  onlyInterest = TRUE)$interest_over_time)
+      
+      #add it to the dataframe
+      trends_df <- rbind(trends_df, data.frame(interest))
+    
+      Sys.sleep(3)
+      
+    }, error = function(e) {
+      
+      #print the error term
+      message("Error occurred for term: ", term)
+      
+    })
+
+  }
+  
+  return(trends_df)
+  
+}
+
+trends_df <- trend_scrap(artist_names)
+```
+```{r eval = FALSE}
+#add the artists reported error to the dataframe manually
+#only one artist occured error: The Temptations
+temptations_interest <- as_tibble(gtrends(keyword = 'The Temptations',
+                                  time = "all",
+                                  onlyInterest = TRUE)$interest_over_time)
+
+trends_df <- rbind(trends_df, data.frame(temptations_interest))
+
+#extract the year from the variable date "yy-mm-dd"
+trends_df <- trends_df %>% mutate(year = year(as.Date(date)))
+    
+#calculate the yearly sum of trends of every artist
+yearly_sum <- trends_df %>% 
+  group_by(year, keyword) %>%
+  summarize(year_sum = sum(hits, na.rm = TRUE), .groups = 'keep')
+
+
+#connect to the database
+music_db <- dbConnect(RSQLite::SQLite(), 'database/music_db.sqlite')
+
+#add the *trends_df* table to the database 
+dbWriteTable(music_db, "trends_df", trends_df)
+dbWriteTable(music_db, "yearly_sum", yearly_sum)
+dbDisconnect(music_db)
+```
+
+
+```{r eval = FALSE}
+#check if the table exists
+check_result_trends_df <- check_table("database/music_db.sqlite", "trends_df")
+print(check_result_trends_df)
+
+check_result_yearly_sum <- check_table("database/music_db.sqlite", "yearly_sum")
+print(check_result_yearly_sum)
+```
+
+
+
+
+```{r}
+#load the data
+cor_df <- read_csv("data/Spotify-2000.csv", show_col_types = FALSE)
+```
+
+
+```{r eval = FALSE}
+#add the *cor_df* into database
+music_db <- dbConnect(RSQLite::SQLite(), 'database/music_db.sqlite')
+dbWriteTable(music_db, "cor_df", cor_df)
+dbDisconnect(music_db)
+```
+
+```{r eval = FALSE}
+#check if the table exists
+check_result_cor_df <- check_table("database/music_db.sqlite", "cor_df")
+print(check_result_cor_df)
+```
+
+
+
+
+## <br> 3. Visulization and Analysis
+
+```{r}
+music_db <- dbConnect(RSQLite::SQLite(), 'database/music_db.sqlite')
+```
+
+### Research Question1: How has the greatest music endured?
+
+#### <br> Graph 1
+```{r}
+table_a <- dbGetQuery(music_db,
+                      "SELECT a.popularity, a.followers, a.top_genre, r.ranking, a.name AS name
+                      FROM artist_df AS a
+                      JOIN rs_df AS r
+                      ON a.name = r.artist")
+
+#plot1: Relationship between Spotify Popularity 2023 and Rolling Stone Ranking
+ggplot(table_a, aes(x = popularity, y = ranking)) +
+  xlab("Artist Popularity") +
+  ylab("Ranking") +
+  ggtitle('Spotify Artist Popularity vs. Rolling Stone Ranking') + 
+  geom_jitter(aes(color = top_genre), size = 1, alpha = 0.8) +
+  geom_text(
+    data = filter(table_a, (popularity < 25 | popularity > 75) & (ranking > 49)),
+    mapping = aes(label = name), 
+    vjust = -0.5, size = 3, 
+    check_overlap = TRUE,
+    hjust = "inward") +
+  theme(panel.border = element_blank())
+```
+
+
+#### Graph 2
+```{r}
+#plot2: Relationship between Spotify Followers 2023 and Rolling Stone Ranking
+ggplot(table_a, aes(x = ranking, y = followers)) +
+  xlab("Ranking") +
+  scale_y_continuous(labels = comma) +
+  ylab("Followers") +
+  ggtitle('Spotify Followers vs. Rolling Stone Ranking') + 
+  geom_jitter(aes(color = top_genre), size = 1, alpha = 0.8) +
+  geom_text(
+    data = filter(table_a, followers > 20000000),
+    mapping = aes(label = name), 
+    vjust = -0.5, size = 3, 
+    hjust = "inward") +
+  theme(panel.border = element_blank()) 
+```
+
+There is no explicit relationship between ranking and consumption, ranking and audience engagement. 
+
+Yet we find that the majority of artists have a SPI of over 50, indicating that they still occupy a high stream on today's streaming platform. Additionally, though there are only 6 Hip-hop artists on the list, they all have a high popularity especially the No.1 Eminem. It shows the changing trend of audiences' music orientation today and its impact on artists' commercial value. Eminem also has the most followers with 80 million while the majority are below 20 million. But put it into context, it's probably because the streaming platform and Hip-hop music, which had an explosion of growth around the same time in the 2010s, correspond to a large overlap of users and listeners. Therefore, Hip-hop artists have a more advantageous fan community in the form of online interaction. Further study should focus on other forms of audience engagement.
+
+
+
+#### <br><br> Graph 3
+```{r message = FALSE}
+# Changes of Google trends from 2004 to 2023
+table_c <- dbGetQuery(music_db,
+                      "SELECT y.year, y.keyword, y.year_sum, a.top_genre
+                      FROM yearly_sum AS y
+                      JOIN artist_df AS a
+                      ON y.keyword = a.name")
+
+#calculate the average hits grouping by music genres and year
+genre_means <- table_c %>%
+  group_by(top_genre, year) %>%
+  summarise(avg_hits = mean(year_sum, na.rm = TRUE), .groups = 'keep')
+
+#plot3: Google Trends of different music genre artists over time
+ggplot(genre_means, aes(x = year, y = avg_hits)) +
+  xlab("Year") +
+  ylab("Average Google Hits") +
+  ggtitle('Average Google Trends over Time') + 
+  geom_smooth(method = 'gam', aes(color = top_genre)) +
+  theme(panel.border = element_blank()) 
+```
+
+Graph3 shows the Google Hits for listed artists from 2004 to 2023 using smooth curve to fit. Overall, cultural impact in the online sphere are down among listed artists. The Hits of Jazz artists drop most from 454 to 103, and the biggest fluctuation is in Hip-hop. Note, however, listed artists are highly limited with few artists in Hip-hop and Jazz. So the finding drawn here is not necessarily meaningful in terms of the whole industry.
+
+
+
+#### <br><br> Graph 4
+```{r warning = FALSE}
+#plot4: change of Google trends of specific artists over time
+plot_ly(filter(table_c, top_genre == 'hiphop'), x = ~year, y = ~year_sum, color = ~keyword, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Google Trends Over Time of HipHop Music Artists",
+         xaxis = list(title = "Time"),
+         yaxis = list(title = "Google Hits"),
+         colorway = ~keyword,
+         showlegend = TRUE)
+
+plot_ly(filter(table_c, keyword == 'The Beatles'), x = ~year, y = ~year_sum, color = ~keyword, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Google Trends Over Time of The Beatles",
+         xaxis = list(title = "Time"),
+         yaxis = list(title = "Google Hits"),
+         colorway = ~keyword,
+         showlegend = TRUE)
+```
+
+
+The fluctuation of Hip-hop artists' Hits are mostly brought by __Eminem__ and __Dr.Dre__. Eminem achieved great success between 2009 and 2010 while Dr.Dre announced to take a break from music in 2011. These were both sensational events at that time, with essential impact on popular culture.
+
+Despite the overall downward trend, The Beatles' Hits in 2009 showed a significant increase. It's mainly because that The *Original Studio Recordings* set  was issued in 2009, which brought the band, active in the 1960s and 1970s, to the fore again. This highlights that the longevity of music popularity is influenced by both the music quality and industrial production.
+
+
+---
+
+
+### <br><br>Research Question2: How can we explain enduring engagement?
+
+What factors would affect the longevity of music popularity? We take a look at both the external cultural environment and the attributes of music itself.
+
+
+#### <br> Graph 5
+```{r}
+#plot5: Popularity across different genres  
+ggplot(table_a, aes(x = top_genre, y = popularity, fill = top_genre)) +
+  xlab("Genre") +
+  ylab("Artist Popularity") +
+  ggtitle('Spotify Artist Popularity across Music Genre') + 
+  geom_boxplot() +
+  theme(panel.border = element_blank())
+```
+
+#### Graph 6
+```{r}
+#plot6: Follower numbers across different genres
+ggplot(table_a, aes(x = top_genre, y = followers, fill = top_genre)) +
+  xlab("Genre") +
+  scale_y_continuous(labels = comma) +
+  ylab("Followers") +
+  ggtitle('Spotify Artist Followers across Music Genre') + 
+  geom_boxplot() +
+  theme(panel.border = element_blank())
+```
+
+#### Graph 7
+```{r}
+#plot7: Google Hits across different genres
+ggplot(genre_means, aes(x = top_genre, y = avg_hits, fill = top_genre)) +
+  xlab("Genre") +
+  scale_y_continuous(labels = comma) +
+  ylab("Google Hits") +
+  ggtitle('Google Hits across Music Genre') + 
+  geom_boxplot() +
+  theme(panel.border = element_blank()) 
+```
+
+Taking a look across __genres__, we find that Hip-hop and Rock music tend to occupy more stream in the Spotify. Yet, Jazz and Folk music have higher Google Hits. It prompts a deeper inquiry into the algorithm of traffic metrics on different platforms.
+
+
+#### <br><br> Graph8
+```{r}
+table_b <- dbGetQuery(music_db,
+                      "SELECT 2023 - SUBSTR(t.release_date, 1, 4)
+                      AS issued_time, t.popularity, a.top_genre
+                      FROM track_df AS t
+                      JOIN artist_df AS a
+                      ON a.name = t.artist")
+
+#plot8: Relationship between Track Popularity and Years Released
+ggplot(table_b, aes(x = issued_time, y = popularity)) +
+  xlab("Years Released") +
+  ylab("Track Popularity") +
+  ggtitle('Track Popularity VS Years Released') + 
+  geom_point(aes(color = top_genre), size = 1, alpha = 1) +
+  theme(panel.border = element_blank()) 
+```
+
+As the distribution of the scatter plot shown, there is no explicit relationship between release date and track popularity.
+
+
+#### <br><br>Table 1
+```{r}
+related_columns <- cor_df[, 6:15]
+
+#calculate the correlation between track features and popularity
+correlation_matrix <- cor(related_columns)
+
+#calculate the p-value
+p <- cor.mtest(related_columns)$p.value
+
+#table1: correlation between tracks' features and popularity
+corrplot(correlation_matrix, method = "number", p.mat = p, type = "upper",
+         tl.col = 'black', tl.srt = 45, tl.cex = 0.7, is.corr = FALSE)
+```
+
+We use the *top-2000s* dataset to analyze the correlation between tracks' popularity and quantitative variables. As all the correlation coefficients are under 0.2, we can state that popularity has no correlation with tracks' features.
+
+```{r}
+dbDisconnect(music_db)
+```
+
+---
+
+---
+
+
+## <br> 4. Conclusion
+
+* Overall, most artists and their top tracks remain popular today with high consumption and audience engagement。 Even as people's listening habits, preferences, and the industrial landscape change over decades, some classic artists and works continue to wield significant cultural influence.
+
+* Music Genres have a significant impact on its enduring, with Hip-hop and Rock still being widely embraced on today's streaming platforms. Note, this is only available to the listed artists. In future work, we need more data on release market, language, and time-series data on followers and popularity for further analysis.
+
+
+
+
+
+
+
+
+
+
+---
+
+---
+
+
+
+## <br><br>Appendix: All code in this assignment
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE} 
+# this chunk generates the complete code appendix. 
+# eval=FALSE tells R not to run (``evaluate'') the code here (it was already run before)
+```
+
